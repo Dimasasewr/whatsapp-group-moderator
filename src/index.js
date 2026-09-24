@@ -74,10 +74,9 @@ async function startBot() {
             printQRInTerminal: false,
 
             browser: [
-                "DIMAS MODERATOR",
-                "Chrome",
-                "1.0.0"
-            ],
+    "Chrome",
+    "Windows"
+],
 
             markOnlineOnConnect: false
 
