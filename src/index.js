@@ -2,12 +2,14 @@ const {
     default: makeWASocket,
     useMultiFileAuthState,
     DisconnectReason,
-    makeCacheableSignalKeyStore
+    makeCacheableSignalKeyStore,
+    fetchLatestWaWebVersion
 } = require("@whiskeysockets/baileys");
 
 const P = require("pino");
 
 const config = require("./config");
+
 const {
     containsBadWord
 } = require("./filters");
@@ -20,13 +22,28 @@ const {
     handleCommand
 } = require("./commands");
 
-const stickerTracker = new Map();
 
-let reconnecting = false;
+/* =========================================================
+   GLOBAL
+========================================================= */
+
+let isStarting = false;
+let reconnectTimer = null;
+
+const stickerTracker = new Map();
 
 
 /* =========================================================
-   NORMALIZE NOMOR WHATSAPP
+   DELAY
+========================================================= */
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+
+/* =========================================================
+   NORMALIZE NOMOR
 ========================================================= */
 
 function normalizePhoneNumber(number) {
@@ -46,7 +63,24 @@ function normalizePhoneNumber(number) {
 
 async function startBot() {
 
+    if (isStarting) {
+        return;
+    }
+
+    isStarting = true;
+
+
     try {
+
+        console.log("");
+        console.log("========================================");
+        console.log("🔄 MEMULAI KONEKSI WHATSAPP");
+        console.log("========================================");
+
+
+        /* =====================================================
+           AUTH
+        ===================================================== */
 
         const {
             state,
@@ -54,7 +88,61 @@ async function startBot() {
         } = await useMultiFileAuthState("auth");
 
 
-        const sock = makeWASocket({
+        /* =====================================================
+           AMBIL VERSI WHATSAPP WEB TERBARU
+        ===================================================== */
+
+        let waVersion;
+
+
+        try {
+
+            const result =
+                await fetchLatestWaWebVersion();
+
+
+            if (
+                result &&
+                result.version
+            ) {
+
+                waVersion =
+                    result.version;
+
+
+                console.log(
+                    `🌐 WhatsApp Web Version: ${waVersion.join(".")}`
+                );
+
+                console.log(
+                    `🌐 Latest: ${result.isLatest}`
+                );
+
+            } else {
+
+                console.log(
+                    "⚠️ Gagal mendapatkan versi WhatsApp Web."
+                );
+
+            }
+
+        } catch (error) {
+
+            console.log(
+                "⚠️ Gagal mengambil versi WhatsApp Web:"
+            );
+
+            console.log(
+                error?.message || error
+            );
+        }
+
+
+        /* =====================================================
+           SOCKET CONFIG
+        ===================================================== */
+
+        const socketConfig = {
 
             auth: {
                 creds: state.creds,
@@ -74,17 +162,49 @@ async function startBot() {
             printQRInTerminal: false,
 
             browser: [
-    "Chrome",
-    "Windows"
-],
+                "Chrome",
+                "Windows"
+            ],
 
-            markOnlineOnConnect: false
+            markOnlineOnConnect: false,
 
-        });
+            connectTimeoutMs: 60000,
+
+            defaultQueryTimeoutMs: 60000,
+
+            keepAliveIntervalMs: 25000,
+
+            generateHighQualityLinkPreview: false
+        };
+
+
+        /*
+         * Hanya masukkan version jika berhasil
+         * mendapatkan versi terbaru.
+         */
+
+        if (waVersion) {
+
+            socketConfig.version =
+                waVersion;
+        }
 
 
         /* =====================================================
-           SAVE SESSION
+           CREATE SOCKET
+        ===================================================== */
+
+        const sock =
+            makeWASocket(
+                socketConfig
+            );
+
+
+        isStarting = false;
+
+
+        /* =====================================================
+           SAVE CREDENTIALS
         ===================================================== */
 
         sock.ev.on(
@@ -136,13 +256,10 @@ async function startBot() {
                             "========================================"
                         );
                         console.log(
-                            "Buka Railway → Variables"
+                            "Railway → Variables"
                         );
                         console.log(
-                            "Tambahkan:"
-                        );
-                        console.log(
-                            "WA_NUMBER = 628xxxxxxxxxx"
+                            "WA_NUMBER=628xxxxxxxxxx"
                         );
                         console.log(
                             "========================================"
@@ -154,25 +271,26 @@ async function startBot() {
 
 
                     /*
-                     * Tunggu sebentar agar koneksi
-                     * Baileys benar-benar siap.
+                     * Beri waktu socket menyelesaikan
+                     * proses handshake awal.
                      */
 
-                    await new Promise(
-                        resolve =>
-                            setTimeout(
-                                resolve,
-                                1500
-                            )
-                    );
+                    await sleep(2000);
 
 
                     try {
 
-                        const pairingCode =
+                        const code =
                             await sock.requestPairingCode(
                                 phoneNumber
                             );
+
+
+                        const formattedCode =
+                            String(code)
+                                .match(/.{1,4}/g)
+                                ?.join("-") ||
+                            code;
 
 
                         console.log("");
@@ -186,10 +304,10 @@ async function startBot() {
                             "========================================"
                         );
                         console.log(
-                            `Nomor: ${phoneNumber}`
+                            `Nomor : ${phoneNumber}`
                         );
                         console.log(
-                            `PAIRING CODE: ${pairingCode}`
+                            `Kode  : ${formattedCode}`
                         );
                         console.log(
                             "========================================"
@@ -198,7 +316,7 @@ async function startBot() {
                             "BUKA WHATSAPP BUSINESS"
                         );
                         console.log(
-                            "→ Setelan"
+                            "Setelan"
                         );
                         console.log(
                             "→ Perangkat tertaut"
@@ -210,7 +328,7 @@ async function startBot() {
                             "→ Tautkan dengan nomor telepon"
                         );
                         console.log(
-                            "→ Masukkan pairing code"
+                            "→ Masukkan kode di atas"
                         );
                         console.log(
                             "========================================"
@@ -219,54 +337,57 @@ async function startBot() {
 
                     } catch (error) {
 
-                        console.error("");
-                        console.error(
+                        console.log("");
+                        console.log(
                             "❌ GAGAL MEMBUAT PAIRING CODE"
                         );
-                        console.error(
+                        console.log(
                             error?.message || error
                         );
-                        console.error("");
+                        console.log("");
 
                     }
                 }
 
 
                 /* =================================================
-                   CONNECTION OPEN
+                   OPEN
                 ================================================= */
 
                 if (
                     connection === "open"
                 ) {
 
-                    reconnecting = false;
-
                     console.log("");
                     console.log(
                         "========================================"
                     );
                     console.log(
-                        "🤖 WHATSAPP MODERATOR AKTIF"
+                        "✅ WHATSAPP BERHASIL TERHUBUNG"
+                    );
+                    console.log(
+                        "========================================"
+                    );
+                    console.log(
+                        "🤖 DIMAS WHATSAPP GROUP MODERATOR"
                     );
                     console.log(
                         "👨‍💻 DIMAS PUTRA PRATAMA"
                     );
                     console.log(
-                        "========================================"
-                    );
-                    console.log(
-                        "Status: ONLINE"
+                        "📡 STATUS: ONLINE"
                     );
                     console.log(
                         "========================================"
                     );
                     console.log("");
+
+                    return;
                 }
 
 
                 /* =================================================
-                   CONNECTION CLOSED
+                   CLOSE
                 ================================================= */
 
                 if (
@@ -295,52 +416,61 @@ async function startBot() {
                     );
 
 
-                    const loggedOut =
+                    /*
+                     * Logout permanen.
+                     */
+
+                    if (
                         statusCode ===
-                        DisconnectReason.loggedOut;
-
-
-                    if (loggedOut) {
+                        DisconnectReason.loggedOut
+                    ) {
 
                         console.log(
                             "❌ WhatsApp logout."
                         );
 
                         console.log(
-                            "Hapus session auth jika ingin login ulang."
+                            "Session auth harus dihapus"
+                        );
+
+                        console.log(
+                            "sebelum mencoba pairing ulang."
                         );
 
                         return;
                     }
 
 
-                    if (!reconnecting) {
+                    /*
+                     * Jangan membuat reconnect
+                     * bertumpuk.
+                     */
 
-                        reconnecting = true;
+                    if (
+                        reconnectTimer
+                    ) {
 
-                        console.log(
-                            "🔄 Mencoba menghubungkan kembali..."
-                        );
+                        return;
+                    }
 
 
+                    console.log(
+                        "🔄 Reconnect dalam 7 detik..."
+                    );
+
+
+                    reconnectTimer =
                         setTimeout(
-                            () => {
+                            async () => {
 
-                                reconnecting = false;
+                                reconnectTimer =
+                                    null;
 
-                                startBot().catch(
-                                    error => {
-                                        console.error(
-                                            "Reconnect error:",
-                                            error
-                                        );
-                                    }
-                                );
+                                await startBot();
 
                             },
-                            5000
+                            7000
                         );
-                    }
                 }
 
             }
@@ -376,8 +506,7 @@ async function startBot() {
 
 
                     /*
-                     * Abaikan pesan yang dikirim
-                     * oleh bot sendiri.
+                     * Abaikan pesan dari bot sendiri.
                      */
 
                     if (
@@ -392,13 +521,14 @@ async function startBot() {
 
 
                     /*
-                     * Hanya bekerja di GROUP
+                     * Hanya group.
                      */
 
                     if (
                         !remoteJid ||
                         !remoteJid.endsWith("@g.us")
                     ) {
+
                         return;
                     }
 
@@ -406,8 +536,8 @@ async function startBot() {
                     /*
                      * GROUP EXCEPTION
                      *
-                     * Grup yang ada di daftar ini
-                     * benar-benar diabaikan bot.
+                     * Semua fitur bot benar-benar
+                     * tidak bekerja di grup ini.
                      */
 
                     if (
@@ -415,6 +545,7 @@ async function startBot() {
                             remoteJid
                         )
                     ) {
+
                         return;
                     }
 
@@ -429,7 +560,7 @@ async function startBot() {
 
 
                     /* =================================================
-                       AMBIL TEXT
+                       TEXT
                     ================================================= */
 
                     const text =
@@ -472,6 +603,7 @@ async function startBot() {
                         if (
                             commandHandled
                         ) {
+
                             return;
                         }
 
@@ -485,7 +617,7 @@ async function startBot() {
 
 
                     /* =================================================
-                       BAD WORD FILTER
+                       FILTER KATA
                     ================================================= */
 
                     if (
@@ -546,11 +678,6 @@ async function startBot() {
                         }
 
 
-                        /*
-                         * Hapus catatan sticker
-                         * yang sudah melewati window.
-                         */
-
                         groupData[userId] =
                             groupData[userId].filter(
                                 timestamp =>
@@ -571,7 +698,7 @@ async function startBot() {
 
 
                         console.log(
-                            `[STICKER] ${userId} → ${stickerCount}`
+                            `[STICKER] ${userId}: ${stickerCount}`
                         );
 
 
@@ -605,10 +732,6 @@ async function startBot() {
                             .trim();
 
 
-                    /*
-                     * "bot"
-                     */
-
                     if (
                         lowerText === "bot"
                     ) {
@@ -625,10 +748,6 @@ async function startBot() {
                         return;
                     }
 
-
-                    /*
-                     * "halo bot"
-                     */
 
                     if (
                         lowerText === "halo bot"
@@ -663,12 +782,15 @@ async function startBot() {
 
     } catch (error) {
 
+        isStarting = false;
+
+
         console.error("");
         console.error(
             "========================================"
         );
         console.error(
-            "❌ GAGAL MENJALANKAN BOT"
+            "❌ ERROR START BOT"
         );
         console.error(
             "========================================"
@@ -681,22 +803,22 @@ async function startBot() {
         );
 
 
-        if (!reconnecting) {
+        if (
+            !reconnectTimer
+        ) {
 
-            reconnecting = true;
+            reconnectTimer =
+                setTimeout(
+                    async () => {
 
-            setTimeout(
-                () => {
+                        reconnectTimer =
+                            null;
 
-                    reconnecting = false;
+                        await startBot();
 
-                    startBot().catch(
-                        console.error
-                    );
-
-                },
-                5000
-            );
+                    },
+                    7000
+                );
         }
     }
 }
@@ -720,13 +842,21 @@ console.log(
     "========================================"
 );
 console.log(
-    "🚀 Starting bot..."
+    "🚀 STARTING..."
 );
 console.log(
     "========================================"
 );
 console.log("");
 
+
 startBot().catch(
-    console.error
+    error => {
+
+        console.error(
+            "FATAL ERROR:",
+            error
+        );
+
+    }
 );
