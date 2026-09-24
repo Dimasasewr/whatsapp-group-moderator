@@ -7,30 +7,170 @@ const {
 } = require("@whiskeysockets/baileys");
 
 const P = require("pino");
+const http = require("http");
+const QRCode = require("qrcode");
 
 const config = require("./config");
-
-const {
-    containsBadWord
-} = require("./filters");
-
-const {
-    moderate
-} = require("./moderator");
-
-const {
-    handleCommand
-} = require("./commands");
+const { containsBadWord } = require("./filters");
+const { moderate } = require("./moderator");
+const { handleCommand } = require("./commands");
 
 
 /* =========================================================
    GLOBAL
 ========================================================= */
 
-let isStarting = false;
+let currentQR = null;
+let botStatus = "STARTING";
 let reconnectTimer = null;
+let starting = false;
 
 const stickerTracker = new Map();
+
+
+/* =========================================================
+   HTTP SERVER
+   Railway perlu aplikasi mendengarkan PORT
+========================================================= */
+
+const PORT = Number(process.env.PORT || 8080);
+
+const server = http.createServer(async (req, res) => {
+
+    if (req.url === "/") {
+
+        res.writeHead(200, {
+            "Content-Type": "text/html; charset=utf-8"
+        });
+
+        res.end(`
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WhatsApp Bot</title>
+
+<style>
+body {
+    margin: 0;
+    background: #111318;
+    color: white;
+    font-family: Arial, sans-serif;
+    text-align: center;
+}
+
+.container {
+    max-width: 500px;
+    margin: 40px auto;
+    padding: 25px;
+}
+
+.card {
+    background: #1c1f26;
+    border-radius: 20px;
+    padding: 25px;
+}
+
+img {
+    width: 300px;
+    max-width: 90%;
+    background: white;
+    padding: 12px;
+    border-radius: 12px;
+}
+
+.status {
+    margin: 15px;
+    padding: 12px;
+    border-radius: 10px;
+    background: #292d36;
+}
+
+button {
+    padding: 12px 20px;
+    border: 0;
+    border-radius: 10px;
+    font-size: 16px;
+}
+</style>
+
+<script>
+setTimeout(() => {
+    location.reload();
+}, 5000);
+</script>
+
+</head>
+
+<body>
+
+<div class="container">
+
+<div class="card">
+
+<h2>🤖 WhatsApp Group Moderator</h2>
+
+<p>DIMAS PUTRA PRATAMA</p>
+
+<div class="status">
+Status: ${botStatus}
+</div>
+
+${
+    currentQR
+    ?
+    `<img src="${currentQR}">`
+    :
+    `<p>QR belum tersedia.</p>`
+}
+
+<p>
+Buka WhatsApp Business →
+Perangkat tertaut →
+Tautkan perangkat →
+Scan QR
+</p>
+
+</div>
+
+</div>
+
+</body>
+</html>
+        `);
+
+        return;
+    }
+
+
+    if (req.url === "/health") {
+
+        res.writeHead(200, {
+            "Content-Type": "application/json"
+        });
+
+        res.end(JSON.stringify({
+            status: botStatus
+        }));
+
+        return;
+    }
+
+
+    res.writeHead(404);
+
+    res.end("Not Found");
+});
+
+
+server.listen(PORT, "0.0.0.0", () => {
+
+    console.log("");
+    console.log("========================================");
+    console.log("🌐 HTTP SERVER AKTIF");
+    console.log(`PORT: ${PORT}`);
+    console.log("========================================");
+});
 
 
 /* =========================================================
@@ -38,43 +178,33 @@ const stickerTracker = new Map();
 ========================================================= */
 
 function sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+
+    return new Promise(resolve => {
+        setTimeout(resolve, ms);
+    });
+
 }
 
 
 /* =========================================================
-   NORMALIZE NOMOR
-========================================================= */
-
-function normalizePhoneNumber(number) {
-
-    if (!number) {
-        return null;
-    }
-
-    return String(number)
-        .replace(/\D/g, "");
-}
-
-
-/* =========================================================
-   START BOT
+   START WHATSAPP
 ========================================================= */
 
 async function startBot() {
 
-    if (isStarting) {
+    if (starting) {
         return;
     }
 
-    isStarting = true;
-
+    starting = true;
 
     try {
 
+        botStatus = "CONNECTING";
+
         console.log("");
         console.log("========================================");
-        console.log("🔄 MEMULAI KONEKSI WHATSAPP");
+        console.log("🔄 MEMULAI WHATSAPP");
         console.log("========================================");
 
 
@@ -89,39 +219,22 @@ async function startBot() {
 
 
         /* =====================================================
-           AMBIL VERSI WHATSAPP WEB TERBARU
+           WA WEB VERSION
         ===================================================== */
 
-        let waVersion;
-
+        let version = undefined;
 
         try {
 
-            const result =
+            const latest =
                 await fetchLatestWaWebVersion();
 
+            if (latest?.version) {
 
-            if (
-                result &&
-                result.version
-            ) {
-
-                waVersion =
-                    result.version;
-
+                version = latest.version;
 
                 console.log(
-                    `🌐 WhatsApp Web Version: ${waVersion.join(".")}`
-                );
-
-                console.log(
-                    `🌐 Latest: ${result.isLatest}`
-                );
-
-            } else {
-
-                console.log(
-                    "⚠️ Gagal mendapatkan versi WhatsApp Web."
+                    `🌐 WA Web Version: ${version.join(".")}`
                 );
 
             }
@@ -129,12 +242,9 @@ async function startBot() {
         } catch (error) {
 
             console.log(
-                "⚠️ Gagal mengambil versi WhatsApp Web:"
+                "⚠️ Tidak bisa mengambil WA Web version."
             );
 
-            console.log(
-                error?.message || error
-            );
         }
 
 
@@ -159,6 +269,11 @@ async function startBot() {
                 level: "silent"
             }),
 
+            /*
+             * QR kita tangani sendiri melalui
+             * connection.update.
+             */
+
             printQRInTerminal: false,
 
             browser: [
@@ -172,39 +287,24 @@ async function startBot() {
 
             defaultQueryTimeoutMs: 60000,
 
-            keepAliveIntervalMs: 25000,
-
-            generateHighQualityLinkPreview: false
+            keepAliveIntervalMs: 25000
         };
 
 
-        /*
-         * Hanya masukkan version jika berhasil
-         * mendapatkan versi terbaru.
-         */
-
-        if (waVersion) {
-
-            socketConfig.version =
-                waVersion;
+        if (version) {
+            socketConfig.version = version;
         }
 
 
-        /* =====================================================
-           CREATE SOCKET
-        ===================================================== */
-
         const sock =
-            makeWASocket(
-                socketConfig
-            );
+            makeWASocket(socketConfig);
 
 
-        isStarting = false;
+        starting = false;
 
 
         /* =====================================================
-           SAVE CREDENTIALS
+           SAVE AUTH
         ===================================================== */
 
         sock.ev.on(
@@ -214,7 +314,7 @@ async function startBot() {
 
 
         /* =====================================================
-           CONNECTION UPDATE
+           CONNECTION
         ===================================================== */
 
         sock.ev.on(
@@ -229,68 +329,25 @@ async function startBot() {
 
 
                 /* =================================================
-                   PAIRING CODE
+                   QR
                 ================================================= */
 
-                if (
-                    qr &&
-                    !state.creds.registered
-                ) {
-
-                    const phoneNumber =
-                        normalizePhoneNumber(
-                            process.env.WA_NUMBER
-                        );
-
-
-                    if (!phoneNumber) {
-
-                        console.log("");
-                        console.log(
-                            "========================================"
-                        );
-                        console.log(
-                            "❌ WA_NUMBER BELUM DISET"
-                        );
-                        console.log(
-                            "========================================"
-                        );
-                        console.log(
-                            "Railway → Variables"
-                        );
-                        console.log(
-                            "WA_NUMBER=628xxxxxxxxxx"
-                        );
-                        console.log(
-                            "========================================"
-                        );
-                        console.log("");
-
-                        return;
-                    }
-
-
-                    /*
-                     * Beri waktu socket menyelesaikan
-                     * proses handshake awal.
-                     */
-
-                    await sleep(2000);
-
+                if (qr) {
 
                     try {
 
-                        const code =
-                            await sock.requestPairingCode(
-                                phoneNumber
+                        currentQR =
+                            await QRCode.toDataURL(
+                                qr,
+                                {
+                                    width: 400,
+                                    margin: 2
+                                }
                             );
 
 
-                        const formattedCode =
-                            String(code)
-                                .match(/.{1,4}/g)
-                                ?.join("-") ||
-                            code;
+                        botStatus =
+                            "MENUNGGU SCAN QR";
 
 
                         console.log("");
@@ -298,37 +355,16 @@ async function startBot() {
                             "========================================"
                         );
                         console.log(
-                            "📱 WHATSAPP PAIRING CODE"
+                            "📱 QR WHATSAPP TERSEDIA"
                         );
                         console.log(
                             "========================================"
                         );
                         console.log(
-                            `Nomor : ${phoneNumber}`
+                            "Buka domain Railway kamu"
                         );
                         console.log(
-                            `Kode  : ${formattedCode}`
-                        );
-                        console.log(
-                            "========================================"
-                        );
-                        console.log(
-                            "BUKA WHATSAPP BUSINESS"
-                        );
-                        console.log(
-                            "Setelan"
-                        );
-                        console.log(
-                            "→ Perangkat tertaut"
-                        );
-                        console.log(
-                            "→ Tautkan perangkat"
-                        );
-                        console.log(
-                            "→ Tautkan dengan nomor telepon"
-                        );
-                        console.log(
-                            "→ Masukkan kode di atas"
+                            "lalu scan QR tersebut."
                         );
                         console.log(
                             "========================================"
@@ -337,16 +373,29 @@ async function startBot() {
 
                     } catch (error) {
 
-                        console.log("");
-                        console.log(
-                            "❌ GAGAL MEMBUAT PAIRING CODE"
+                        console.error(
+                            "❌ Gagal membuat QR:",
+                            error
                         );
-                        console.log(
-                            error?.message || error
-                        );
-                        console.log("");
 
                     }
+                }
+
+
+                /* =================================================
+                   CONNECTING
+                ================================================= */
+
+                if (
+                    connection === "connecting"
+                ) {
+
+                    botStatus =
+                        "CONNECTING";
+
+                    console.log(
+                        "🔄 Connecting..."
+                    );
                 }
 
 
@@ -358,12 +407,16 @@ async function startBot() {
                     connection === "open"
                 ) {
 
+                    currentQR = null;
+
+                    botStatus = "ONLINE";
+
                     console.log("");
                     console.log(
                         "========================================"
                     );
                     console.log(
-                        "✅ WHATSAPP BERHASIL TERHUBUNG"
+                        "✅ WHATSAPP BERHASIL TERTAUT"
                     );
                     console.log(
                         "========================================"
@@ -381,8 +434,6 @@ async function startBot() {
                         "========================================"
                     );
                     console.log("");
-
-                    return;
                 }
 
 
@@ -406,18 +457,23 @@ async function startBot() {
                         "========================================"
                     );
                     console.log(
-                        "⚠️ KONEKSI WHATSAPP TERPUTUS"
+                        "⚠️ WHATSAPP TERPUTUS"
                     );
                     console.log(
-                        `Status Code: ${statusCode || "unknown"}`
+                        `Status: ${statusCode || "unknown"}`
                     );
                     console.log(
                         "========================================"
                     );
 
 
+                    botStatus =
+                        "DISCONNECTED";
+
+
                     /*
-                     * Logout permanen.
+                     * Kalau logout permanen,
+                     * jangan reconnect tanpa batas.
                      */
 
                     if (
@@ -429,22 +485,12 @@ async function startBot() {
                             "❌ WhatsApp logout."
                         );
 
-                        console.log(
-                            "Session auth harus dihapus"
-                        );
-
-                        console.log(
-                            "sebelum mencoba pairing ulang."
-                        );
+                        botStatus =
+                            "LOGGED OUT";
 
                         return;
                     }
 
-
-                    /*
-                     * Jangan membuat reconnect
-                     * bertumpuk.
-                     */
 
                     if (
                         reconnectTimer
@@ -455,7 +501,7 @@ async function startBot() {
 
 
                     console.log(
-                        "🔄 Reconnect dalam 7 detik..."
+                        "🔄 Reconnect 7 detik lagi..."
                     );
 
 
@@ -498,16 +544,10 @@ async function startBot() {
                     }
 
 
-                    if (
-                        !message.message
-                    ) {
+                    if (!message.message) {
                         return;
                     }
 
-
-                    /*
-                     * Abaikan pesan dari bot sendiri.
-                     */
 
                     if (
                         message.key?.fromMe
@@ -520,25 +560,17 @@ async function startBot() {
                         message.key?.remoteJid;
 
 
-                    /*
-                     * Hanya group.
-                     */
-
                     if (
                         !remoteJid ||
                         !remoteJid.endsWith("@g.us")
                     ) {
-
                         return;
                     }
 
 
-                    /*
-                     * GROUP EXCEPTION
-                     *
-                     * Semua fitur bot benar-benar
-                     * tidak bekerja di grup ini.
-                     */
+                    /* =================================================
+                       EXCLUDED GROUP
+                    ================================================= */
 
                     if (
                         config.EXCLUDED_GROUPS.includes(
@@ -592,7 +624,7 @@ async function startBot() {
 
                     try {
 
-                        const commandHandled =
+                        const handled =
                             await handleCommand(
                                 sock,
                                 message,
@@ -600,24 +632,21 @@ async function startBot() {
                             );
 
 
-                        if (
-                            commandHandled
-                        ) {
-
+                        if (handled) {
                             return;
                         }
 
                     } catch (error) {
 
                         console.error(
-                            "❌ Command error:",
+                            "Command error:",
                             error
                         );
                     }
 
 
                     /* =================================================
-                       FILTER KATA
+                       BAD WORD
                     ================================================= */
 
                     if (
@@ -692,18 +721,12 @@ async function startBot() {
                         );
 
 
-                        const stickerCount =
-                            groupData[userId]
-                                .length;
-
-
-                        console.log(
-                            `[STICKER] ${userId}: ${stickerCount}`
-                        );
+                        const count =
+                            groupData[userId].length;
 
 
                         if (
-                            stickerCount >=
+                            count >=
                             config.STICKER_LIMIT
                         ) {
 
@@ -763,14 +786,12 @@ async function startBot() {
                             }
                         );
 
-                        return;
                     }
-
 
                 } catch (error) {
 
                     console.error(
-                        "❌ Message handler error:",
+                        "Message handler error:",
                         error
                     );
 
@@ -782,24 +803,15 @@ async function startBot() {
 
     } catch (error) {
 
-        isStarting = false;
+        starting = false;
+
+        botStatus =
+            "ERROR";
 
 
-        console.error("");
         console.error(
-            "========================================"
-        );
-        console.error(
-            "❌ ERROR START BOT"
-        );
-        console.error(
-            "========================================"
-        );
-        console.error(
+            "❌ START ERROR:",
             error
-        );
-        console.error(
-            "========================================"
         );
 
 
@@ -821,6 +833,7 @@ async function startBot() {
                 );
         }
     }
+
 }
 
 
@@ -841,22 +854,5 @@ console.log(
 console.log(
     "========================================"
 );
-console.log(
-    "🚀 STARTING..."
-);
-console.log(
-    "========================================"
-);
-console.log("");
 
-
-startBot().catch(
-    error => {
-
-        console.error(
-            "FATAL ERROR:",
-            error
-        );
-
-    }
-);
+startBot();
