@@ -6,7 +6,6 @@ const {
 } = require("@whiskeysockets/baileys");
 
 const P = require("pino");
-const qrcode = require("qrcode-terminal");
 
 const config = require("./config");
 const { containsBadWord } = require("./filters");
@@ -20,9 +19,7 @@ async function startBot() {
     const {
         state,
         saveCreds
-    } = await useMultiFileAuthState(
-        "auth"
-    );
+    } = await useMultiFileAuthState("auth");
 
     const sock = makeWASocket({
         auth: {
@@ -51,38 +48,137 @@ async function startBot() {
         saveCreds
     );
 
+    /*
+    ====================================
+    PAIRING CODE
+    ====================================
+    */
+
+    if (
+        !state.creds.registered
+    ) {
+
+        const phoneNumber =
+            process.env.WA_NUMBER;
+
+        if (!phoneNumber) {
+
+            console.log(
+                "================================"
+            );
+
+            console.log(
+                "❌ WA_NUMBER belum diset."
+            );
+
+            console.log(
+                "Masukkan nomor WhatsApp Business"
+            );
+
+            console.log(
+                "di Railway Variables."
+            );
+
+            console.log(
+                "Contoh: 628123456789"
+            );
+
+            console.log(
+                "================================"
+            );
+
+            return;
+        }
+
+        try {
+
+            const code =
+                await sock.requestPairingCode(
+                    phoneNumber
+                );
+
+            console.log(
+                "================================"
+            );
+
+            console.log(
+                "📱 WHATSAPP PAIRING CODE"
+            );
+
+            console.log(
+                "================================"
+            );
+
+            console.log(
+                `Nomor: ${phoneNumber}`
+            );
+
+            console.log(
+                `PAIRING CODE: ${code}`
+            );
+
+            console.log(
+                "================================"
+            );
+
+            console.log(
+                "Buka WhatsApp Business:"
+            );
+
+            console.log(
+                "Perangkat tertaut"
+            );
+
+            console.log(
+                "→ Tautkan perangkat"
+            );
+
+            console.log(
+                "→ Tautkan dengan nomor telepon"
+            );
+
+            console.log(
+                "→ Masukkan pairing code"
+            );
+
+            console.log(
+                "================================"
+            );
+
+        } catch (error) {
+
+            console.error(
+                "❌ Gagal membuat pairing code:",
+                error
+            );
+        }
+    }
+
+    /*
+    ====================================
+    CONNECTION
+    ====================================
+    */
+
     sock.ev.on(
         "connection.update",
         async update => {
 
             const {
                 connection,
-                lastDisconnect,
-                qr
+                lastDisconnect
             } = update;
-
-            if (qr) {
-                console.log(
-                    "\nScan QR berikut menggunakan WhatsApp:\n"
-                );
-
-                qrcode.generate(
-                    qr,
-                    {
-                        small: true
-                    }
-                );
-            }
 
             if (
                 connection === "open"
             ) {
+
                 console.log(
-                    "\n================================"
+                    "================================"
                 );
 
                 console.log(
-                    "🤖 WhatsApp Moderator aktif"
+                    "🤖 WHATSAPP MODERATOR AKTIF"
                 );
 
                 console.log(
@@ -90,7 +186,7 @@ async function startBot() {
                 );
 
                 console.log(
-                    "================================\n"
+                    "================================"
                 );
             }
 
@@ -109,16 +205,19 @@ async function startBot() {
                     DisconnectReason.loggedOut;
 
                 console.log(
-                    "Koneksi terputus."
+                    "Koneksi WhatsApp terputus."
                 );
 
                 if (shouldReconnect) {
+
                     console.log(
                         "Menghubungkan kembali..."
                     );
 
                     startBot();
+
                 } else {
+
                     console.log(
                         "WhatsApp logout."
                     );
@@ -127,6 +226,12 @@ async function startBot() {
         }
     );
 
+    /*
+    ====================================
+    MESSAGE HANDLER
+    ====================================
+    */
+
     sock.ev.on(
         "messages.upsert",
         async ({ messages }) => {
@@ -134,26 +239,15 @@ async function startBot() {
             const message =
                 messages[0];
 
-            if (!message) {
-                return;
-            }
+            if (!message) return;
 
-            if (
-                !message.message
-            ) {
-                return;
-            }
+            if (!message.message) return;
 
-            if (
-                message.key.fromMe
-            ) {
-                return;
-            }
+            if (message.key.fromMe) return;
 
             const remoteJid =
                 message.key.remoteJid;
 
-            // Hanya grup
             if (
                 !remoteJid ||
                 !remoteJid.endsWith("@g.us")
@@ -164,13 +258,13 @@ async function startBot() {
             const userId =
                 message.key.participant;
 
-            if (!userId) {
-                return;
-            }
+            if (!userId) return;
 
-            /* =========================
-               TEXT
-            ========================= */
+            /*
+            ==============================
+            TEXT
+            ==============================
+            */
 
             const text =
                 message.message.conversation ||
@@ -182,22 +276,22 @@ async function startBot() {
                     ?.caption ||
                 "";
 
-            /* =========================
-               COMMAND
-            ========================= */
+            /*
+            ==============================
+            COMMAND
+            ==============================
+            */
 
             try {
 
-                const commandHandled =
+                const handled =
                     await handleCommand(
                         sock,
                         message,
                         text
                     );
 
-                if (commandHandled) {
-                    return;
-                }
+                if (handled) return;
 
             } catch (error) {
 
@@ -207,9 +301,11 @@ async function startBot() {
                 );
             }
 
-            /* =========================
-               EXCLUDED GROUP
-            ========================= */
+            /*
+            ==============================
+            EXCLUDED GROUP
+            ==============================
+            */
 
             if (
                 config.EXCLUDED_GROUPS.includes(
@@ -219,9 +315,11 @@ async function startBot() {
                 return;
             }
 
-            /* =========================
-               BAD WORD FILTER
-            ========================= */
+            /*
+            ==============================
+            BAD WORD
+            ==============================
+            */
 
             if (
                 text &&
@@ -237,9 +335,11 @@ async function startBot() {
                 return;
             }
 
-            /* =========================
-               STICKER SPAM
-            ========================= */
+            /*
+            ==============================
+            STICKER SPAM
+            ==============================
+            */
 
             const sticker =
                 message.message.stickerMessage;
@@ -284,15 +384,8 @@ async function startBot() {
                     now
                 );
 
-                const stickerCount =
-                    groupData[userId].length;
-
-                console.log(
-                    `[STICKER] ${userId}: ${stickerCount}`
-                );
-
                 if (
-                    stickerCount >=
+                    groupData[userId].length >=
                     config.STICKER_LIMIT
                 ) {
 
@@ -308,14 +401,14 @@ async function startBot() {
                 }
             }
 
-            /* =========================
-               AUTO REPLY
-            ========================= */
+            /*
+            ==============================
+            AUTO REPLY
+            ==============================
+            */
 
             const lowerText =
-                text
-                    .toLowerCase()
-                    .trim();
+                text.toLowerCase().trim();
 
             if (
                 lowerText === "bot"
